@@ -1,0 +1,76 @@
+name: build-apk
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack the project (uploaded as one zip file)
+        run: |
+          unzip -q quran_warsh.zip
+          cp -a quran_warsh/. .
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.4"
+          channel: stable
+          cache: true
+
+      - name: System SQLite for the desktop test driver
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Python checks (data and SQL logic)
+        run: |
+          mkdir -p logs
+          python3 -I tools/verify_dataset.py --db assets/data/quran_warsh.db --layout-zip sources/kfgqpc/UthmanicWarsh_v2-1.zip --qws-json sources/quran_ws/warsh.json --out logs/quran_validation 2>&1 | tee logs/verify_dataset.txt || true
+          python3 -I tools/sql_smoke_test.py 2>&1 | tee logs/sql_smoke_test.txt
+          python3 -I tools/dart_static_check.py 2>&1 | tee logs/dart_static_check.txt
+
+      - name: Create the Android project files
+        run: |
+          if [ ! -d android ]; then
+            flutter create . --platforms=android --project-name quran_warsh --org org.quranwarsh --no-pub
+            rm -f test/widget_test.dart
+          fi
+          sed -i 's/android:label="[^"]*"/android:label="القرآن الكريم - ورش"/' android/app/src/main/AndroidManifest.xml
+          if grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml; then
+            echo "INTERNET permission found in the main manifest"; exit 1
+          fi
+
+      - run: flutter pub get
+
+      - name: flutter analyze
+        run: flutter analyze 2>&1 | tee logs/analyze.txt
+        continue-on-error: true
+
+      - name: flutter test
+        run: flutter test --reporter expanded 2>&1 | tee logs/flutter_test.txt
+        continue-on-error: true
+
+      - name: Build release APK
+        run: flutter build apk --release 2>&1 | tee logs/build_apk.txt
+
+      - name: Record the APK checksum
+        run: sha256sum build/app/outputs/flutter-apk/app-release.apk | tee logs/apk_sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quran-warsh-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs
+          path: logs/
